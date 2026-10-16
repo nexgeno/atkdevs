@@ -9,6 +9,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
+from flask import Flask
 
 if os.name == 'nt':
     os.system('color')
@@ -66,8 +67,10 @@ class Log:
         
     @staticmethod
     def draw_banner():
-        # Lấy chính xác chiều rộng của console hiện tại bằng shutil
-        term_width = shutil.get_terminal_size((90, 20)).columns
+        try:
+            term_width = shutil.get_terminal_size((90, 20)).columns
+        except Exception:
+            term_width = 90
 
         colors = [Log.RED, Log.YELLOW, Log.GREEN, Log.CYAN, Log.BLUE, Log.MAGENTA, Log.WHITE]
         
@@ -346,10 +349,18 @@ class TokenManager:
         self.is_running: bool = False
 
     def load_tokens(self) -> List[str]:
-        token_file = Path(__file__).parent / "tokens.txt"
+        # Ưu tiên tìm file trong thư mục Secret của Render
+        secret_path = Path("/etc/secrets/tokens.txt")
+        local_path = Path(__file__).parent / "tokens.txt"
+        
+        token_file = secret_path if secret_path.exists() else local_path
+
         if not token_file.exists():
-            token_file.write_text("", encoding="utf-8")
-            Log.warn("KHÔNG TÌM THẤY TOKENS.TXT - ĐÃ TẠO FILE MỚI, VUI LÒNG THÊM TOKEN")
+            try:
+                local_path.write_text("", encoding="utf-8")
+            except:
+                pass
+            Log.warn("KHÔNG TÌM THẤY TOKENS.TXT - VUI LÒNG THÊM TOKEN VÀO SECRET FILE HOẶC THƯ MỤC GỐC")
             return []
 
         tokens = []
@@ -360,8 +371,11 @@ class TokenManager:
         return tokens
 
     def save_tokens(self, tokens: List[str]) -> None:
-        token_file = Path(__file__).parent / "tokens.txt"
-        token_file.write_text("\n".join(tokens), encoding="utf-8")
+        try:
+            token_file = Path(__file__).parent / "tokens.txt"
+            token_file.write_text("\n".join(tokens), encoding="utf-8")
+        except Exception as e:
+            Log.warn(f"KHÔNG THỂ LƯU TOKENS.TXT (Có thể do dùng Secret File): {e}")
 
     def process_and_run(self, raw_tokens: List[str]) -> None:
         Log.info(f"BẮT ĐẦU KIỂM TRA VÀ ONLINE TUẦN TỰ CHO {len(raw_tokens)} TOKENS...")
@@ -423,15 +437,14 @@ class TokenManager:
         Log.info(f"HOÀN TẤT! ĐANG DUY TRÌ ONLINE CHO {Log.GREEN}{len(live_tokens)}{Log.RESET} TOKENS.")
         
         if not live_tokens:
-            Log.error("TẤT CẢ TOKEN ĐỀU DEAD - DỪNG CHƯƠNG TRÌNH")
-            sys.exit(0)
+            Log.error("TẤT CẢ TOKEN ĐỀU DEAD - KHÔNG CÓ TOKEN NÀO ĐỂ CHẠY")
 
     def start(self) -> None:
         raw_tokens = self.load_tokens()
 
         if not raw_tokens:
             Log.error("KHÔNG CÓ TOKEN TRONG TOKENS.TXT")
-            sys.exit(1)
+            return # Không sys.exit để web server vẫn chạy
             
         Log.draw_banner()
         
@@ -473,7 +486,6 @@ class TokenManager:
         for keeper in self.keepers:
             keeper.disconnect()
         Log.success("TẤT CẢ TOKENS ĐÃ ĐƯỢC NGẮT KẾT NỐI AN TOÀN")
-        sys.exit(0)
 
 def validate_all_tokens() -> None:
     Log.draw_banner()
@@ -539,15 +551,59 @@ def validate_all_tokens() -> None:
 
     print(f"\n=> KẾT QUẢ: \033[92m{valid_count}\033[0m/\033[93m{len(tokens)}\033[0m TOKENS CÒN SỐNG.\n")
 
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(description="DISCORD 24/7 TOKEN KEEPER AND AFK GAME")
-    parser.add_argument("--validate", "-v", action="store_true", help="CHỈ KIỂM TRA TOKENS, KHÔNG ONLINE")
-    
-    args = parser.parse_args()
+# ==========================================
+# PHẦN WEB SERVER (FLASK) DÀNH CHO RENDER
+# ==========================================
+app = Flask(__name__)
+manager = TokenManager()
 
-    if args.validate:
-        validate_all_tokens()
-    else:
-        manager = TokenManager()
-        manager.start()
+@app.route('/')
+def home():
+    total_tokens = len(manager.keepers)
+    online_tokens = sum(1 for k in manager.keepers if k.is_ready)
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+        <head>
+            <title>ZYROX TOKEN KEEPER</title>
+            <meta http-equiv="refresh" content="30">
+            <style>
+                body {{ background-color: #121212; color: #ffffff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; padding-top: 50px; margin: 0; }}
+                .container {{ max-width: 800px; margin: auto; padding: 20px; }}
+                h1 {{ color: #00ffcc; text-shadow: 0 0 10px #00ffcc; }}
+                .card {{ background-color: #1e1e1e; border-radius: 10px; padding: 30px; margin-top: 30px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); border: 1px solid #333; }}
+                .status-text {{ font-size: 20px; margin-bottom: 20px; }}
+                .online {{ color: #4CAF50; font-weight: bold; font-size: 28px; }}
+                .offline {{ color: #F44336; font-weight: bold; font-size: 28px; }}
+                .footer {{ margin-top: 40px; font-size: 14px; color: #888; }}
+                .badge {{ background-color: #00ffcc; color: #000; padding: 5px 10px; border-radius: 5px; font-weight: bold; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>ZYROX TOKEN KEEPER</h1>
+                <div class="card">
+                    <div class="status-text">Trạng thái hệ thống: <span class="online">ĐANG HOẠT ĐỘNG</span></div>
+                    <hr style="border-color: #333;">
+                    <p style="font-size: 22px; margin-top: 20px;">Số lượng Token Online:</p>
+                    <p><span class="online">{online_tokens}</span> <span style="color: #888;">/ {total_tokens}</span></p>
+                    <p style="margin-top: 30px;"><span class="badge">Auto Refresh: 30s</span></p>
+                </div>
+                <div class="footer">
+                    Tool By: @awrt_205 | Discord: <a href="https://discord.com/invite/zyroxcity" style="color: #00ffcc; text-decoration: none;">ZYROX CITY</a>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+    return html
+
+if __name__ == "__main__":
+    # 1. Chạy tool Discord ở background thread
+    bot_thread = threading.Thread(target=manager.start, daemon=True)
+    bot_thread.start()
+    
+    # 2. Chạy Web Server cho Render
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
